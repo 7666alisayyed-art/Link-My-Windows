@@ -26,8 +26,17 @@ jobs:
           flutter create --platforms=android --project-name link_my_windows --org com.linkmywindows .
           git checkout -- lib pubspec.yaml
           rm -rf test
-          sed -i 's|<application|<uses-permission android:name="android.permission.INTERNET"/>\n    <application android:usesCleartextTraffic="true"|' android/app/src/main/AndroidManifest.xml
-          sed -i 's|android:label="[^"]*"|android:label="Link my Windows"|' android/app/src/main/AndroidManifest.xml
+          cp native_android/AndroidManifest.xml android/app/src/main/AndroidManifest.xml
+          mkdir -p android/app/src/main/kotlin/com/linkmywindows/link_my_windows
+          cp native_android/MainActivity.kt android/app/src/main/kotlin/com/linkmywindows/link_my_windows/MainActivity.kt
+          cp native_android/ScreenService.kt android/app/src/main/kotlin/com/linkmywindows/link_my_windows/ScreenService.kt
+          if [ -f android/build.gradle.kts ]; then
+            cat native_android/compile_sdk_patch.gradle.kts.txt android/build.gradle.kts > android/build.tmp
+            mv android/build.tmp android/build.gradle.kts
+          else
+            cat native_android/compile_sdk_patch.groovy.txt android/build.gradle > android/build.tmp
+            mv android/build.tmp android/build.gradle
+          fi
           flutter pub get
           flutter build apk --release
           mv build/app/outputs/flutter-apk/app-release.apk LinkMyWindows.apk

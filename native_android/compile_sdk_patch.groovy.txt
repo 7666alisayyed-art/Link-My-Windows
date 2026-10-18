@@ -1,0 +1,11 @@
+// Added by the GitHub workflow: make every Android module compile against SDK 36.
+subprojects {
+    afterEvaluate { project ->
+        if (project.hasProperty('android')) {
+            project.android {
+                compileSdkVersion 36
+            }
+        }
+    }
+}
+

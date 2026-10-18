@@ -1,23 +1,32 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:camera/camera.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:qr_flutter/qr_flutter.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 const int kPort = 48080;
 const Color kBg = Color(0xFF0B1220);
 const Color kCard = Color(0xFF111A2E);
 const Color kBorder = Color(0xFF1E2A44);
 const Color kBlue = Color(0xFF2563EB);
+const Color kMuted = Color(0xFF94A3B8);
 
 void main() => runApp(const LinkApp());
 
 /// Runs a tiny web server on this device and talks to the other device's server.
 /// The same code runs on Android and Windows.
 class LinkService extends ChangeNotifier {
+  static const MethodChannel _native = MethodChannel('lmw/native');
+
   final String code = (100000 + Random.secure().nextInt(900000)).toString();
   final String deviceName = Platform.localHostname;
   final Set<String> _tokens = {};
@@ -28,11 +37,24 @@ class LinkService extends ChangeNotifier {
   String? peerName;
   String? token;
 
+  bool autoClip = true;
+  bool sharingScreen = false;
+  bool sharingCam = false;
+  Uint8List? _camFrame;
+  String _lastClip = '';
+  bool _ticking = false;
+  Timer? _clipTimer;
+
   bool get linked => peerHost != null && token != null;
 
   void _log(String line) {
     log.insert(0, line);
     if (log.length > 50) log.removeLast();
+    notifyListeners();
+  }
+
+  void setAutoClip(bool v) {
+    autoClip = v;
     notifyListeners();
   }
 
@@ -53,6 +75,7 @@ class LinkService extends ChangeNotifier {
     } catch (e) {
       _log('Could not start on port $kPort: $e');
     }
+    _clipTimer = Timer.periodic(const Duration(seconds: 1), (_) => _clipTick());
     notifyListeners();
   }
 
@@ -100,6 +123,7 @@ class LinkService extends ChangeNotifier {
       }
       if (req.method == 'POST' && req.uri.path == '/clip') {
         final text = await utf8.decoder.bind(req).join();
+        _lastClip = text;
         await Clipboard.setData(ClipboardData(text: text));
         await _reply(req, 200);
         _log('Clipboard received and copied');
@@ -115,6 +139,27 @@ class LinkService extends ChangeNotifier {
         await sink.close();
         await _reply(req, 200);
         _log('Received $name (saved in ${dir.path})');
+        return;
+      }
+      if (req.method == 'GET' &&
+          (req.uri.path == '/screen.jpg' || req.uri.path == '/cam.jpg')) {
+        Uint8List? bytes;
+        if (req.uri.path == '/screen.jpg') {
+          if (Platform.isAndroid && sharingScreen) {
+            bytes = await _native.invokeMethod<Uint8List>('getScreenFrame');
+          }
+        } else {
+          bytes = _camFrame;
+        }
+        if (bytes == null) {
+          await _reply(req, 204);
+          return;
+        }
+        req.response.statusCode = 200;
+        req.response.headers.contentType = ContentType('image', 'jpeg');
+        req.response.contentLength = bytes.length;
+        req.response.add(bytes);
+        await req.response.close();
         return;
       }
       await _reply(req, 404);
@@ -151,6 +196,25 @@ class LinkService extends ChangeNotifier {
     }
   }
 
+  /// What the QR code on this device contains: the pairing code and every
+  /// IP address this device has.
+  String get qrData => 'LMW|$code|${ips.join(",")}';
+
+  /// Links using the text read from the other device's QR code.
+  Future<String?> pairFromQr(String data) async {
+    final parts = data.split('|');
+    if (parts.length != 3 || parts[0] != 'LMW') {
+      return 'That is not a Link my Windows code.';
+    }
+    for (final ip in parts[2].split(',')) {
+      if (ip.isEmpty) continue;
+      final e = await pair(ip, parts[1]);
+      if (e == null) return null;
+      if (e == 'Wrong pairing code.') return e;
+    }
+    return 'Could not reach the other device. Same Wi-Fi? App open on both devices?';
+  }
+
   void unlink() {
     peerHost = null;
     peerName = null;
@@ -173,9 +237,30 @@ class LinkService extends ChangeNotifier {
     }
   }
 
+  /// Copies new clipboard text to the other device (checked once a second).
+  /// On Android the system only allows reading the clipboard while the app
+  /// is open on screen.
+  Future<void> _clipTick() async {
+    if (!linked || !autoClip || _ticking) return;
+    _ticking = true;
+    try {
+      final data = await Clipboard.getData('text/plain');
+      final text = data?.text ?? '';
+      if (text.isNotEmpty && text != _lastClip) {
+        _lastClip = text;
+        await _postText('/clip', text);
+        _log('Clipboard synced to $peerName');
+      }
+    } catch (_) {
+    } finally {
+      _ticking = false;
+    }
+  }
+
   Future<void> sendText(String text) async {
     if (!linked || text.isEmpty) return;
     try {
+      _lastClip = text;
       await _postText('/clip', text);
       _log('Sent text to $peerName');
     } catch (e) {
@@ -219,8 +304,78 @@ class LinkService extends ChangeNotifier {
     }
   }
 
+  /// Android only: start or stop sharing this phone's screen.
+  Future<void> toggleScreen() async {
+    if (!Platform.isAndroid) return;
+    try {
+      if (sharingScreen) {
+        await _native.invokeMethod('stopScreen');
+        sharingScreen = false;
+        _log('Screen sharing stopped');
+      } else {
+        final ok = await _native.invokeMethod<bool>('startScreen');
+        sharingScreen = ok == true;
+        _log(sharingScreen
+            ? 'Screen sharing started'
+            : 'Screen sharing was cancelled');
+      }
+    } catch (e) {
+      _log('Screen sharing failed: $e');
+    }
+    notifyListeners();
+  }
+
+  /// Android only: turn the phone camera on or off as a webcam.
+  Future<void> toggleCamera() async {
+    if (!Platform.isAndroid) return;
+    if (sharingCam) {
+      sharingCam = false;
+      notifyListeners();
+      return;
+    }
+    try {
+      final cams = await availableCameras();
+      if (cams.isEmpty) {
+        _log('No camera found');
+        return;
+      }
+      final desc = cams.firstWhere(
+          (c) => c.lensDirection == CameraLensDirection.back,
+          orElse: () => cams.first);
+      final ctrl =
+          CameraController(desc, ResolutionPreset.medium, enableAudio: false);
+      await ctrl.initialize();
+      await ctrl.setFlashMode(FlashMode.off);
+      sharingCam = true;
+      await WakelockPlus.enable();
+      _log('Camera is on. Keep this app open on your phone.');
+      notifyListeners();
+      while (sharingCam) {
+        try {
+          final f = await ctrl.takePicture();
+          _camFrame = await f.readAsBytes();
+          try {
+            await File(f.path).delete();
+          } catch (_) {}
+        } catch (_) {
+          await Future.delayed(const Duration(milliseconds: 300));
+        }
+        await Future.delayed(const Duration(milliseconds: 30));
+      }
+      await ctrl.dispose();
+      _camFrame = null;
+      await WakelockPlus.disable();
+      _log('Camera stopped');
+    } catch (e) {
+      sharingCam = false;
+      _log('Camera failed: $e');
+    }
+  }
+
   @override
   void dispose() {
+    sharingCam = false;
+    _clipTimer?.cancel();
     _server?.close(force: true);
     super.dispose();
   }
@@ -276,6 +431,23 @@ class _HomePageState extends State<HomePage> {
     super.dispose();
   }
 
+  Future<void> scan() async {
+    final value = await Navigator.of(context).push<String>(
+        MaterialPageRoute(builder: (_) => const ScannerPage()));
+    if (value == null || !mounted) return;
+    setState(() {
+      busy = true;
+      error = null;
+    });
+    final e = await svc.pairFromQr(value);
+    if (mounted) {
+      setState(() {
+        busy = false;
+        error = e;
+      });
+    }
+  }
+
   Widget card(List<Widget> children) => Container(
         margin: const EdgeInsets.only(bottom: 14),
         padding: const EdgeInsets.all(18),
@@ -288,6 +460,10 @@ class _HomePageState extends State<HomePage> {
             crossAxisAlignment: CrossAxisAlignment.start, children: children),
       );
 
+  Widget heading(String t) => Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Text(t, style: const TextStyle(fontWeight: FontWeight.w700)));
+
   List<Widget> pairView() => [
         const Text('Link your devices',
             style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800)),
@@ -295,27 +471,53 @@ class _HomePageState extends State<HomePage> {
         const Text(
             'Open this app on your phone and your PC, on the same Wi-Fi. '
             'Type the other device\'s IP address and pairing code below.',
-            style: TextStyle(color: Color(0xFF94A3B8), height: 1.4)),
+            style: TextStyle(color: kMuted, height: 1.4)),
         const SizedBox(height: 20),
+        if (Platform.isAndroid)
+          card([
+            heading('Instant link'),
+            SizedBox(
+              width: double.infinity,
+              height: 50,
+              child: FilledButton.icon(
+                onPressed: busy ? null : scan,
+                icon: const Icon(Icons.qr_code_scanner),
+                label: Text(busy ? 'Connecting…' : 'Scan QR code'),
+              ),
+            ),
+            const SizedBox(height: 10),
+            const Text('Open the app on your PC and scan the code it shows.',
+                style: TextStyle(color: kMuted)),
+            if (error != null)
+              Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Text(error!,
+                      style: const TextStyle(color: Color(0xFFF87171)))),
+          ]),
         card([
-          const Text('This device',
-              style: TextStyle(fontWeight: FontWeight.w700)),
-          const SizedBox(height: 8),
+          heading('This device'),
+          if (svc.ips.isNotEmpty)
+            Center(
+              child: Container(
+                padding: const EdgeInsets.all(10),
+                color: Colors.white,
+                child: QrImageView(
+                    data: svc.qrData, size: 180, backgroundColor: Colors.white),
+              ),
+            ),
+          if (svc.ips.isNotEmpty) const SizedBox(height: 12),
           if (svc.ips.isEmpty)
             const Text('No Wi-Fi address found')
           else
             for (final ip in svc.ips) SelectableText('IP address: $ip'),
           const SizedBox(height: 10),
-          const Text('Pairing code',
-              style: TextStyle(color: Color(0xFF94A3B8))),
+          const Text('Pairing code', style: TextStyle(color: kMuted)),
           SelectableText(svc.code,
               style: const TextStyle(
                   fontSize: 38, fontWeight: FontWeight.w800, letterSpacing: 6)),
         ]),
         card([
-          const Text('Link to the other device',
-              style: TextStyle(fontWeight: FontWeight.w700)),
-          const SizedBox(height: 12),
+          heading('Link to the other device'),
           TextField(
               controller: hostC,
               keyboardType: TextInputType.number,
@@ -346,8 +548,8 @@ class _HomePageState extends State<HomePage> {
                         busy = true;
                         error = null;
                       });
-                      final e = await svc.pair(
-                          hostC.text.trim(), codeC.text.trim());
+                      final e =
+                          await svc.pair(hostC.text.trim(), codeC.text.trim());
                       if (mounted) {
                         setState(() {
                           busy = false;
@@ -370,8 +572,81 @@ class _HomePageState extends State<HomePage> {
         for (final l in svc.log)
           Padding(
               padding: const EdgeInsets.only(bottom: 6),
-              child: Text(l, style: const TextStyle(color: Color(0xFF94A3B8)))),
+              child: Text(l, style: const TextStyle(color: kMuted))),
       ];
+
+  void openViewer(String path, String title) {
+    Navigator.of(context).push(MaterialPageRoute(
+        builder: (_) => ViewerPage(svc: svc, path: path, title: title)));
+  }
+
+  List<Widget> mediaCard() {
+    if (Platform.isAndroid) {
+      return [
+        card([
+          heading('Share from this phone'),
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: FilledButton.icon(
+              onPressed: svc.toggleScreen,
+              icon: Icon(svc.sharingScreen
+                  ? Icons.stop_screen_share
+                  : Icons.screen_share),
+              label: Text(
+                  svc.sharingScreen ? 'Stop sharing screen' : 'Share my screen'),
+            ),
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: FilledButton.tonalIcon(
+              onPressed: svc.toggleCamera,
+              icon: Icon(svc.sharingCam ? Icons.videocam_off : Icons.videocam),
+              label:
+                  Text(svc.sharingCam ? 'Turn camera off' : 'Use as webcam'),
+            ),
+          ),
+          const SizedBox(height: 10),
+          const Text(
+              'After you start one, open "View phone screen" or "View phone '
+              'camera" on your PC. Keep this app open while the camera is on.',
+              style: TextStyle(color: kMuted, height: 1.4)),
+        ]),
+      ];
+    }
+    return [
+      card([
+        heading('Your phone on this PC'),
+        SizedBox(
+          width: double.infinity,
+          height: 50,
+          child: FilledButton.icon(
+            onPressed: () => openViewer('/screen.jpg', 'Phone screen'),
+            icon: const Icon(Icons.smartphone),
+            label: const Text('View phone screen'),
+          ),
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          width: double.infinity,
+          height: 50,
+          child: FilledButton.tonalIcon(
+            onPressed: () => openViewer('/cam.jpg', 'Phone camera'),
+            icon: const Icon(Icons.videocam),
+            label: const Text('View phone camera'),
+          ),
+        ),
+        const SizedBox(height: 10),
+        const Text(
+            'Start sharing on the phone first. To use the camera in Zoom, '
+            'Meet or Teams: open OBS Studio, add this window with "Window '
+            'Capture", then click "Start Virtual Camera".',
+            style: TextStyle(color: kMuted, height: 1.4)),
+      ]),
+    ];
+  }
 
   List<Widget> hubView() => [
         card([
@@ -391,15 +666,30 @@ class _HomePageState extends State<HomePage> {
             OutlinedButton(onPressed: svc.unlink, child: const Text('Unlink')),
           ]),
         ]),
-        SizedBox(
-          height: 52,
-          child: FilledButton.icon(
-              onPressed: svc.sendClipboard,
-              icon: const Icon(Icons.content_paste),
-              label: const Text('Send my clipboard')),
-        ),
-        const SizedBox(height: 12),
+        ...mediaCard(),
         card([
+          heading('Clipboard'),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Sync clipboard automatically'),
+            subtitle: Text(
+                Platform.isAndroid
+                    ? 'On the phone this works while the app is open.'
+                    : 'Copy on one device, paste on the other.',
+                style: const TextStyle(color: kMuted)),
+            value: svc.autoClip,
+            onChanged: svc.setAutoClip,
+          ),
+          const SizedBox(height: 6),
+          SizedBox(
+            width: double.infinity,
+            height: 46,
+            child: FilledButton.tonalIcon(
+                onPressed: svc.sendClipboard,
+                icon: const Icon(Icons.content_paste),
+                label: const Text('Send my clipboard now')),
+          ),
+          const SizedBox(height: 12),
           TextField(
               controller: textC,
               minLines: 1,
@@ -415,14 +705,17 @@ class _HomePageState extends State<HomePage> {
               },
               child: const Text('Send text')),
         ]),
-        SizedBox(
-          height: 52,
-          child: FilledButton.tonalIcon(
-              onPressed: svc.sendFile,
-              icon: const Icon(Icons.upload_file),
-              label: const Text('Send a file')),
-        ),
-        const SizedBox(height: 8),
+        card([
+          heading('Files'),
+          SizedBox(
+            width: double.infinity,
+            height: 50,
+            child: FilledButton.tonalIcon(
+                onPressed: svc.sendFile,
+                icon: const Icon(Icons.upload_file),
+                label: const Text('Send a file')),
+          ),
+        ]),
         ...activityView(),
       ];
 
@@ -445,6 +738,118 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// Android only: scans the QR code shown on the other device.
+class ScannerPage extends StatefulWidget {
+  const ScannerPage({super.key});
+
+  @override
+  State<ScannerPage> createState() => _ScannerPageState();
+}
+
+class _ScannerPageState extends State<ScannerPage> {
+  bool done = false;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Scan the QR code')),
+      body: MobileScanner(
+        onDetect: (capture) {
+          if (done || capture.barcodes.isEmpty) return;
+          final v = capture.barcodes.first.rawValue;
+          if (v == null) return;
+          done = true;
+          Navigator.of(context).pop(v);
+        },
+      ),
+    );
+  }
+}
+
+/// Shows a live picture from the other device by asking for a new frame
+/// again and again.
+class ViewerPage extends StatefulWidget {
+  const ViewerPage(
+      {super.key, required this.svc, required this.path, required this.title});
+
+  final LinkService svc;
+  final String path;
+  final String title;
+
+  @override
+  State<ViewerPage> createState() => _ViewerPageState();
+}
+
+class _ViewerPageState extends State<ViewerPage> {
+  Uint8List? frame;
+  bool run = true;
+  String status = 'Waiting for the phone to start sharing…';
+
+  @override
+  void initState() {
+    super.initState();
+    _loop();
+  }
+
+  @override
+  void dispose() {
+    run = false;
+    super.dispose();
+  }
+
+  Future<void> _loop() async {
+    final c = HttpClient()..connectionTimeout = const Duration(seconds: 3);
+    while (run) {
+      try {
+        final r = await c.getUrl(Uri.parse(
+            'http://${widget.svc.peerHost}:$kPort${widget.path}'));
+        r.headers.set('x-token', widget.svc.token ?? '');
+        final resp = await r.close();
+        if (resp.statusCode == 200) {
+          final b = await resp.fold<BytesBuilder>(BytesBuilder(), (b, d) {
+            b.add(d);
+            return b;
+          });
+          if (mounted && run) setState(() => frame = b.takeBytes());
+        } else {
+          await resp.drain();
+          if (mounted && run) {
+            setState(() {
+              frame = null;
+              status = 'Waiting for the phone to start sharing…';
+            });
+          }
+          await Future.delayed(const Duration(milliseconds: 500));
+        }
+      } catch (_) {
+        if (mounted && run) {
+          setState(() => status = 'Cannot reach the phone. Is the app open?');
+        }
+        await Future.delayed(const Duration(milliseconds: 800));
+      }
+      await Future.delayed(const Duration(milliseconds: 60));
+    }
+    c.close(force: true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text(widget.title)),
+      backgroundColor: Colors.black,
+      body: Center(
+        child: frame == null
+            ? Padding(
+                padding: const EdgeInsets.all(24),
+                child: Text(status,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(color: kMuted)))
+            : Image.memory(frame!, gaplessPlayback: true, fit: BoxFit.contain),
       ),
     );
   }

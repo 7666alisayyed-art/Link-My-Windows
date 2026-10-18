@@ -77,6 +77,10 @@ class ScreenService : Service() {
         val mgr = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
         val p = mgr.getMediaProjection(ScreenHolder.resultCode, data)
         projection = p
+        if (p == null) {
+stopSelf()
+return
+        }
 
         val t = HandlerThread("lmw-capture")
         t.start()

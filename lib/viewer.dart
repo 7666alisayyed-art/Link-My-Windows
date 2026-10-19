@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:math';
 import 'dart:ui' as ui;
@@ -7,11 +8,27 @@ import 'dart:ui' as ui;
 import 'package:ffi/ffi.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:win32/win32.dart' as w32;
 import 'package:window_manager/window_manager.dart';
 
 import 'service.dart';
 import 'theme.dart';
+
+// Direct calls into Windows (only touched when the window is shown on Windows).
+final DynamicLibrary _user32 = DynamicLibrary.open('user32.dll');
+final DynamicLibrary _gdi32 = DynamicLibrary.open('gdi32.dll');
+final int Function() _getForegroundWindow =
+    _user32.lookupFunction<IntPtr Function(), int Function()>(
+        'GetForegroundWindow');
+final int Function(int, Pointer<Int32>) _getWindowRect = _user32.lookupFunction<
+    Int32 Function(IntPtr, Pointer<Int32>),
+    int Function(int, Pointer<Int32>)>('GetWindowRect');
+final int Function(int, int, int) _setWindowRgn = _user32.lookupFunction<
+    Int32 Function(IntPtr, IntPtr, Int32),
+    int Function(int, int, int)>('SetWindowRgn');
+final int Function(int, int, int, int, int, int) _createRoundRectRgn =
+    _gdi32.lookupFunction<
+        IntPtr Function(Int32, Int32, Int32, Int32, Int32, Int32),
+        int Function(int, int, int, int, int, int)>('CreateRoundRectRgn');
 
 /// Windows only. Turns the app window into a floating, rounded, always-on-top
 /// window that shows the phone screen or camera, like a phone on your desk.
@@ -54,7 +71,7 @@ class _FloatViewerState extends State<FloatViewer> with WindowListener {
       await windowManager.setAsFrameless();
       await windowManager.setAlwaysOnTop(true);
       await windowManager.setSize(const Size(360, 780));
-      _hwnd = w32.GetForegroundWindow();
+      _hwnd = _getForegroundWindow();
       await Future.delayed(const Duration(milliseconds: 80));
       _round();
     } catch (_) {}
@@ -62,7 +79,7 @@ class _FloatViewerState extends State<FloatViewer> with WindowListener {
 
   Future<void> _exit() async {
     try {
-      if (_hwnd != 0) w32.SetWindowRgn(_hwnd, 0, 1);
+      if (_hwnd != 0) _setWindowRgn(_hwnd, 0, 1);
       await windowManager.setAspectRatio(0);
       await windowManager.setAlwaysOnTop(false);
       await windowManager.setTitleBarStyle(TitleBarStyle.normal);
@@ -75,14 +92,14 @@ class _FloatViewerState extends State<FloatViewer> with WindowListener {
   /// Gives the window rounded corners.
   void _round() {
     if (_hwnd == 0) return;
-    final rect = calloc<w32.RECT>();
+    final rect = calloc<Int32>(4);
     try {
-      if (w32.GetWindowRect(_hwnd, rect) == 0) return;
-      final w = rect.ref.right - rect.ref.left;
-      final h = rect.ref.bottom - rect.ref.top;
+      if (_getWindowRect(_hwnd, rect) == 0) return;
+      final w = rect[2] - rect[0];
+      final h = rect[3] - rect[1];
       final ell = (min(w, h) * 0.2).round();
-      final rgn = w32.CreateRoundRectRgn(0, 0, w + 1, h + 1, ell, ell);
-      w32.SetWindowRgn(_hwnd, rgn, 1);
+      final rgn = _createRoundRectRgn(0, 0, w + 1, h + 1, ell, ell);
+      _setWindowRgn(_hwnd, rgn, 1);
     } catch (_) {
     } finally {
       calloc.free(rect);

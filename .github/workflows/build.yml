@@ -30,6 +30,12 @@ jobs:
           mkdir -p android/app/src/main/kotlin/com/linkmywindows/link_my_windows
           cp native_android/MainActivity.kt android/app/src/main/kotlin/com/linkmywindows/link_my_windows/MainActivity.kt
           cp native_android/ScreenService.kt android/app/src/main/kotlin/com/linkmywindows/link_my_windows/ScreenService.kt
+          cp native_android/CameraStreamer.kt android/app/src/main/kotlin/com/linkmywindows/link_my_windows/CameraStreamer.kt
+          if [ -f icon_mdpi.png ]; then cp icon_mdpi.png android/app/src/main/res/mipmap-mdpi/ic_launcher.png; fi
+          if [ -f icon_hdpi.png ]; then cp icon_hdpi.png android/app/src/main/res/mipmap-hdpi/ic_launcher.png; fi
+          if [ -f icon_xhdpi.png ]; then cp icon_xhdpi.png android/app/src/main/res/mipmap-xhdpi/ic_launcher.png; fi
+          if [ -f icon_xxhdpi.png ]; then cp icon_xxhdpi.png android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png; fi
+          if [ -f icon_xxxhdpi.png ]; then cp icon_xxxhdpi.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png; fi
           if [ -f android/build.gradle.kts ]; then
             cat native_android/compile_sdk_patch.gradle.kts.txt android/build.gradle.kts > android/build.tmp
             mv android/build.tmp android/build.gradle.kts
@@ -38,7 +44,7 @@ jobs:
             mv android/build.tmp android/build.gradle
           fi
           flutter pub get
-          flutter build apk --release
+          flutter build apk --release --no-shrink
           mv build/app/outputs/flutter-apk/app-release.apk LinkMyWindows.apk
       - uses: actions/upload-artifact@v4
         with:
@@ -64,6 +70,7 @@ jobs:
           git checkout -- lib pubspec.yaml
           rm -rf test
           sed -i 's|L"link_my_windows"|L"Link my Windows"|' windows/runner/main.cpp
+          if [ -f app_icon.ico ]; then cp app_icon.ico windows/runner/resources/app_icon.ico; fi
           flutter pub get
           flutter build windows --release
       - name: Zip

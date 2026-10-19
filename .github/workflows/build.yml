@@ -36,6 +36,25 @@ jobs:
           if [ -f icon_xhdpi.png ]; then cp icon_xhdpi.png android/app/src/main/res/mipmap-xhdpi/ic_launcher.png; fi
           if [ -f icon_xxhdpi.png ]; then cp icon_xxhdpi.png android/app/src/main/res/mipmap-xxhdpi/ic_launcher.png; fi
           if [ -f icon_xxxhdpi.png ]; then cp icon_xxxhdpi.png android/app/src/main/res/mipmap-xxxhdpi/ic_launcher.png; fi
+          cp native_android/ControlService.kt android/app/src/main/kotlin/com/linkmywindows/link_my_windows/ControlService.kt
+          mkdir -p android/app/src/main/res/xml android/app/src/main/res/values
+          cat > android/app/src/main/res/xml/accessibility_service_config.xml <<'XMLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagDefault"
+              android:canPerformGestures="true"
+              android:canRetrieveWindowContent="true"
+              android:description="@string/lmw_control_description"
+              android:notificationTimeout="100" />
+          XMLEOF
+          cat > android/app/src/main/res/values/lmw_strings.xml <<'XMLEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="lmw_control_description">Lets your linked PC tap, swipe and type on this phone while you use the phone screen window.</string>
+          </resources>
+          XMLEOF
           if [ -f android/build.gradle.kts ]; then
             cat native_android/compile_sdk_patch.gradle.kts.txt android/build.gradle.kts > android/build.tmp
             mv android/build.tmp android/build.gradle.kts

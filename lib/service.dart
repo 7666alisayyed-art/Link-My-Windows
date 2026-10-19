@@ -49,6 +49,7 @@ class LinkService extends ChangeNotifier {
   bool autoClip = true;
   bool sharingScreen = false;
   bool sharingCam = false;
+  bool controlReady = false;
   int camRotation = 90;
   final FrameBus screenBus = FrameBus();
   final FrameBus camBus = FrameBus();
@@ -90,12 +91,53 @@ class LinkService extends ChangeNotifier {
     }
     _clipTimer =
         Timer.periodic(const Duration(milliseconds: 700), (_) => _clipTick());
+    await refreshControl();
     notifyListeners();
   }
 
   Future<void> onResume() async {
+    await refreshControl();
     await _clipTick();
     await handleShared();
+  }
+
+  /// Android: is the "control from PC" accessibility service switched on?
+  Future<void> refreshControl() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final on = await _native.invokeMethod<bool>('controlEnabled');
+      if (on != controlReady) {
+        controlReady = on == true;
+        notifyListeners();
+      }
+    } catch (_) {}
+  }
+
+  Future<void> openAccessibilitySettings() async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _native.invokeMethod('openAccessibility');
+    } catch (_) {}
+  }
+
+  /// Windows: sends a tap, swipe, key or text to the phone.
+  /// Returns the HTTP status (200 ok, 409 phone has not enabled control).
+  Future<int> sendControl(Map<String, dynamic> m) async {
+    if (!linked) return 0;
+    final c = HttpClient()..connectionTimeout = const Duration(seconds: 3);
+    try {
+      final r = await c.postUrl(Uri.parse('http://$peerHost:$kPort/ctl'));
+      r.headers.set('x-token', token!);
+      r.headers.contentType = ContentType.json;
+      r.write(jsonEncode(m));
+      final resp = await r.close();
+      await resp.drain();
+      return resp.statusCode;
+    } catch (_) {
+      return 0;
+    } finally {
+      c.close(force: true);
+    }
   }
 
   Future<void> _reply(HttpRequest req, int status, [String body = '']) async {
@@ -158,6 +200,16 @@ class LinkService extends ChangeNotifier {
             compression: CompressionOptions.compressionOff);
         final cam = req.uri.path == '/ws/cam';
         _serveFrames(ws, cam ? camBus : screenBus, cam ? camRotation : 0);
+        return;
+      }
+      if (req.method == 'POST' && req.uri.path == '/ctl') {
+        final m = jsonDecode(await utf8.decoder.bind(req).join());
+        if (!Platform.isAndroid) {
+          await _reply(req, 404);
+          return;
+        }
+        final ok = await _native.invokeMethod<bool>('control', m);
+        await _reply(req, ok == true ? 200 : 409);
         return;
       }
       if (req.method == 'POST' && req.uri.path == '/clip') {

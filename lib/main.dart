@@ -343,7 +343,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               'top of other apps, even when this app is minimised. Drag it '
               'anywhere, resize it from the corner, press Esc to close.'),
           gap(8),
-          body('Tap "Share my screen" on the phone first.'),
+          body('Tap "Share my screen" on the phone first. In the window, tap '
+              'the hand icon to click, drag and type on the phone from your '
+              'PC. This needs "Control from your PC" switched on in the '
+              'phone app.'),
           gap(16),
           GlassButton(
             label: 'Open phone screen',
@@ -391,6 +394,34 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         body('After you start one, open it from the Share page on your PC. '
             'Keep this app open while the camera is on.'),
       ], icon: Icons.ios_share),
+      card('Control from your PC', [
+        Row(children: [
+          Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: svc.controlReady ? kGreen : kMuted,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Text(svc.controlReady ? 'On' : 'Off',
+              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+        ]),
+        gap(10),
+        body('Lets you tap, swipe and type on this phone from the phone '
+            'screen window on your PC. Find Link my Windows in Accessibility '
+            'settings and switch it on. If it is greyed out, open this app\'s '
+            'App info, tap the three dots and choose Allow restricted '
+            'settings.'),
+        gap(16),
+        GlassButton(
+          label: svc.controlReady ? 'Open Accessibility settings' : 'Turn on',
+          icon: Icons.accessibility_new,
+          primary: !svc.controlReady,
+          onTap: svc.openAccessibilitySettings,
+        ),
+      ], icon: Icons.touch_app_outlined),
     ];
   }
 

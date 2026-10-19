@@ -6,6 +6,7 @@ import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:ffi/ffi.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:window_manager/window_manager.dart';
@@ -51,6 +52,13 @@ class _FloatViewerState extends State<FloatViewer> with WindowListener {
   bool _run = true;
   bool _hover = false;
   bool _pinned = true;
+  bool _ctl = false;
+  Size _box = const Size(1, 1);
+  Offset _p0 = Offset.zero;
+  Offset _p1 = Offset.zero;
+  DateTime _t0 = DateTime.now();
+  String _note = '';
+  Timer? _noteTimer;
   double _aspect = 0;
   int _hwnd = 0;
   Rect? _prev;
@@ -60,6 +68,14 @@ class _FloatViewerState extends State<FloatViewer> with WindowListener {
   void initState() {
     super.initState();
     windowManager.addListener(this);
+    _ctl = widget.kind == 'screen';
+    if (_ctl) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _send({'t': 'key', 'k': ''});
+        _say('Control is on: click to tap, drag to swipe, scroll with the '
+            'wheel, right-click for Back.');
+      });
+    }
     _enter();
     _connect();
   }
@@ -220,11 +236,116 @@ class _FloatViewerState extends State<FloatViewer> with WindowListener {
     if (mounted) setState(() {});
   }
 
+
+  void _say(String t) {
+    setState(() => _note = t);
+    _noteTimer?.cancel();
+    _noteTimer = Timer(const Duration(seconds: 5), () {
+      if (mounted) setState(() => _note = '');
+    });
+  }
+
+  Future<void> _send(Map<String, dynamic> m) async {
+    final code = await widget.svc.sendControl(m);
+    if (code == 409) {
+      _say('On your phone: Settings, Accessibility, Link my Windows, turn on.');
+    } else if (code != 200 && mounted) {
+      _say('Could not reach the phone.');
+    }
+  }
+
+  void _toggleCtl() {
+    setState(() => _ctl = !_ctl);
+    if (_ctl) {
+      _say('Control is on: click, drag and type. Use the top bar to move '
+          'this window.');
+      _send({'t': 'key', 'k': ''});
+    }
+  }
+
+  void _tapAt(Offset p) {
+    _send({
+      't': 'tap',
+      'x': (p.dx / _box.width).clamp(0.0, 1.0),
+      'y': (p.dy / _box.height).clamp(0.0, 1.0),
+    });
+  }
+
+  void _swipeEnd() {
+    final ms = DateTime.now().difference(_t0).inMilliseconds;
+    _send({
+      't': 'swipe',
+      'x1': (_p0.dx / _box.width).clamp(0.0, 1.0),
+      'y1': (_p0.dy / _box.height).clamp(0.0, 1.0),
+      'x2': (_p1.dx / _box.width).clamp(0.0, 1.0),
+      'y2': (_p1.dy / _box.height).clamp(0.0, 1.0),
+      'ms': ms < 80 ? 80 : (ms > 700 ? 700 : ms),
+    });
+  }
+
+  KeyEventResult _onKey(FocusNode node, KeyEvent ev) {
+    if (!_ctl || ev is KeyUpEvent) return KeyEventResult.ignored;
+    final k = ev.logicalKey;
+    if (k == LogicalKeyboardKey.escape) return KeyEventResult.ignored;
+    final ctrl = HardwareKeyboard.instance.isControlPressed;
+    if (ctrl && k == LogicalKeyboardKey.keyV) {
+      Clipboard.getData('text/plain').then((d) {
+        final t = d?.text ?? '';
+        if (t.isNotEmpty) _send({'t': 'text', 's': t});
+      });
+      return KeyEventResult.handled;
+    }
+    if (k == LogicalKeyboardKey.backspace) {
+      _send({'t': 'bs'});
+      return KeyEventResult.handled;
+    }
+    if (k == LogicalKeyboardKey.enter) {
+      _send({'t': 'enter'});
+      return KeyEventResult.handled;
+    }
+    final ch = ev.character;
+    if (!ctrl && ch != null && ch.isNotEmpty && ch.codeUnitAt(0) >= 32) {
+      _send({'t': 'text', 's': ch});
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
+  }
+
+  DateTime _lastWheel = DateTime.fromMillisecondsSinceEpoch(0);
+
+  void _wheel(PointerSignalEvent e) {
+    if (!_ctl || e is! PointerScrollEvent) return;
+    final now = DateTime.now();
+    if (now.difference(_lastWheel).inMilliseconds < 110) return;
+    _lastWheel = now;
+    final x = (e.localPosition.dx / _box.width).clamp(0.05, 0.95);
+    final y = (e.localPosition.dy / _box.height).clamp(0.2, 0.8);
+    final d = e.scrollDelta.dy > 0 ? 0.22 : -0.22;
+    _send({
+      't': 'swipe',
+      'x1': x,
+      'y1': y,
+      'x2': x,
+      'y2': (y - d).clamp(0.02, 0.98),
+      'ms': 140,
+    });
+  }
+
+  void _pointerDown(PointerDownEvent e) {
+    if (!_ctl) return;
+    if (e.buttons == kSecondaryMouseButton) {
+      _send({'t': 'key', 'k': 'back'});
+    } else if (e.buttons == kMiddleMouseButton) {
+      _send({'t': 'key', 'k': 'home'});
+    }
+  }
+
   void _close() => Navigator.of(context).pop();
 
   @override
   void dispose() {
     _run = false;
+    _noteTimer?.cancel();
     try {
       _ws?.close();
     } catch (_) {}
@@ -257,6 +378,7 @@ class _FloatViewerState extends State<FloatViewer> with WindowListener {
       bindings: {const SingleActivator(LogicalKeyboardKey.escape): _close},
       child: Focus(
         autofocus: true,
+        onKeyEvent: _onKey,
         child: Scaffold(
           backgroundColor: Colors.black,
           body: MouseRegion(
@@ -264,9 +386,26 @@ class _FloatViewerState extends State<FloatViewer> with WindowListener {
             onExit: (_) => setState(() => _hover = false),
             child: Stack(children: [
               Positioned.fill(
-                child: GestureDetector(
+                child: LayoutBuilder(builder: (context, c) {
+                  _box = Size(c.maxWidth < 1 ? 1 : c.maxWidth,
+                      c.maxHeight < 1 ? 1 : c.maxHeight);
+                  return Listener(
+                    onPointerSignal: _wheel,
+                    onPointerDown: _pointerDown,
+                    child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
-                  onPanStart: (_) => windowManager.startDragging(),
+                  onTapUp: _ctl ? (d) => _tapAt(d.localPosition) : null,
+                  onPanDown: _ctl
+                      ? (d) {
+                          _p0 = d.localPosition;
+                          _p1 = d.localPosition;
+                          _t0 = DateTime.now();
+                        }
+                      : null,
+                  onPanStart:
+                      _ctl ? null : (_) => windowManager.startDragging(),
+                  onPanUpdate: _ctl ? (d) => _p1 = d.localPosition : null,
+                  onPanEnd: _ctl ? (_) => _swipeEnd() : null,
                   child: img == null
                       ? Center(
                           child: Padding(
@@ -284,6 +423,31 @@ class _FloatViewerState extends State<FloatViewer> with WindowListener {
                             filterQuality: FilterQuality.medium,
                           ),
                         ),
+                  ),
+                  );
+                }),
+              ),
+              // Grab bar to move the window while control is on
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                height: 26,
+                child: GestureDetector(
+                  behavior: HitTestBehavior.translucent,
+                  onPanStart: (_) => windowManager.startDragging(),
+                  child: Align(
+                    alignment: Alignment.topCenter,
+                    child: Container(
+                      margin: const EdgeInsets.only(top: 6),
+                      width: 44,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: wh(_ctl ? 0.55 : 0),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                  ),
                 ),
               ),
               Positioned(
@@ -302,6 +466,18 @@ class _FloatViewerState extends State<FloatViewer> with WindowListener {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 8, vertical: 2),
                         child: Row(mainAxisSize: MainAxisSize.min, children: [
+                          if (widget.kind == 'screen')
+                            _tool(Icons.touch_app, 'Control the phone',
+                                _toggleCtl,
+                                active: _ctl),
+                          if (widget.kind == 'screen' && _ctl) ...[
+                            _tool(Icons.arrow_back, 'Back',
+                                () => _send({'t': 'key', 'k': 'back'})),
+                            _tool(Icons.circle_outlined, 'Home',
+                                () => _send({'t': 'key', 'k': 'home'})),
+                            _tool(Icons.crop_square, 'Recent apps',
+                                () => _send({'t': 'key', 'k': 'recents'})),
+                          ],
                           _tool(Icons.remove, 'Smaller', () => _scale(0.9)),
                           _tool(Icons.add, 'Bigger', () => _scale(1.1)),
                           _tool(Icons.rotate_right, 'Rotate', _rotate),
@@ -314,6 +490,23 @@ class _FloatViewerState extends State<FloatViewer> with WindowListener {
                   ),
                 ),
               ),
+              if (_note.isNotEmpty)
+                Positioned(
+                  left: 14,
+                  right: 14,
+                  bottom: 18,
+                  child: IgnorePointer(
+                    child: Glass(
+                      radius: 18,
+                      blur: 18,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 10),
+                      child: Text(_note,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontSize: 12.5, height: 1.3)),
+                    ),
+                  ),
+                ),
               Positioned(
                 right: 0,
                 bottom: 0,

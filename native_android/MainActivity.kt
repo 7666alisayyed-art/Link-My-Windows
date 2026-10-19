@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.provider.OpenableColumns
+import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
 import io.flutter.embedding.android.FlutterActivity
@@ -127,6 +128,35 @@ class MainActivity : FlutterActivity() {
                     val s = pendingShare
                     pendingShare = null
                     result.success(s)
+                }
+                "controlEnabled" -> result.success(ControlService.instance != null)
+                "openAccessibility" -> {
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                    result.success(true)
+                }
+                "control" -> {
+                    val svc = ControlService.instance
+                    if (svc == null) {
+                        result.success(false)
+                    } else {
+                        val dm = resources.displayMetrics
+                        val w = dm.widthPixels.toFloat()
+                        val h = dm.heightPixels.toFloat()
+                        val x1 = (call.argument<Double>("x1") ?: call.argument<Double>("x") ?: 0.0).toFloat() * w
+                        val y1 = (call.argument<Double>("y1") ?: call.argument<Double>("y") ?: 0.0).toFloat() * h
+                        val x2 = (call.argument<Double>("x2") ?: call.argument<Double>("x") ?: 0.0).toFloat() * w
+                        val y2 = (call.argument<Double>("y2") ?: call.argument<Double>("y") ?: 0.0).toFloat() * h
+                        val ms = (call.argument<Int>("ms") ?: 60).toLong()
+                        when (call.argument<String>("t")) {
+                            "tap" -> svc.swipe(x1, y1, x1, y1, 50)
+                            "swipe" -> svc.swipe(x1, y1, x2, y2, ms)
+                            "key" -> svc.key(call.argument<String>("k") ?: "")
+                            "text" -> svc.typeText(call.argument<String>("s") ?: "")
+                            "bs" -> svc.backspace()
+                            "enter" -> svc.enter()
+                        }
+                        result.success(true)
+                    }
                 }
                 else -> result.notImplemented()
             }

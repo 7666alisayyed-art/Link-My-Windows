@@ -23,6 +23,7 @@ import java.io.ByteArrayOutputStream
 object ScreenHolder {
     @Volatile
     var frame: ByteArray? = null
+    var onFrame: ((ByteArray) -> Unit)? = null
     var resultCode: Int = 0
     var data: Intent? = null
 }
@@ -78,8 +79,8 @@ class ScreenService : Service() {
         val p = mgr.getMediaProjection(ScreenHolder.resultCode, data)
         projection = p
         if (p == null) {
-stopSelf()
-return
+            stopSelf()
+            return
         }
 
         val t = HandlerThread("lmw-capture")
@@ -113,7 +114,7 @@ return
             if (img != null) {
                 try {
                     val now = SystemClock.elapsedRealtime()
-                    if (now - lastFrameAt >= 100) {
+                    if (now - lastFrameAt >= 66) {
                         lastFrameAt = now
                         val plane = img.planes[0]
                         val pixelStride = plane.pixelStride
@@ -124,8 +125,10 @@ return
                         full.copyPixelsFromBuffer(plane.buffer)
                         val bmp = if (rowPadding > 0) Bitmap.createBitmap(full, 0, 0, w, h) else full
                         val out = ByteArrayOutputStream()
-                        bmp.compress(Bitmap.CompressFormat.JPEG, 55, out)
-                        ScreenHolder.frame = out.toByteArray()
+                        bmp.compress(Bitmap.CompressFormat.JPEG, 60, out)
+                        val bytes = out.toByteArray()
+                        ScreenHolder.frame = bytes
+                        ScreenHolder.onFrame?.invoke(bytes)
                         if (bmp !== full) bmp.recycle()
                         full.recycle()
                     }
